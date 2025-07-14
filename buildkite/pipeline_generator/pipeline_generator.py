@@ -15,11 +15,16 @@ class PipelineGeneratorConfig:
         container_registry: str,
         container_registry_repo: str,
         commit: str,
-        list_file_diff: List[str],
+        list_file_diff: Union[str, List[str]],
         run_all: bool = False,
     ):
         self.run_all = run_all
-        self.list_file_diff = list_file_diff
+
+        if isinstance(list_file_diff, str):
+            self.list_file_diff = list_file_diff.split(",") if list_file_diff else []
+        else:
+            self.list_file_diff = list_file_diff
+
         self.container_registry = container_registry
         self.container_registry_repo = container_registry_repo
         self.commit = commit
@@ -34,6 +39,12 @@ class PipelineGeneratorConfig:
         pattern = r"^[0-9a-f]{40}$"
         if not re.match(pattern, self.commit):
             raise ValueError(f"Commit {self.commit} is not a valid Git commit hash")
+    
+    def should_use_precompiled_wheel(self) -> bool:
+        if self.run_all:
+            return False
+        watched_paths = ("CMakeLists.txt", "csrc/", "cmake/", "docker/Dockerfile", ".buildkite/")
+        return not any(any(f.startswith(p) for p in watched_paths) for f in self.list_file_diff)
 
 
 class PipelineGenerator:
@@ -46,7 +57,13 @@ class PipelineGenerator:
 
     def generate_build_step(self) -> BuildkiteStep:
         """Build the Docker image and push it to container registry."""
-        build_commands = get_build_commands(self.config.container_registry, self.config.commit, self.config.container_image)
+        use_precompiled = self.should_use_precompiled_wheel()
+        build_commands = get_build_commands(
+            self.config.container_registry,
+            self.config.commit,
+            self.config.container_image,
+            use_precompiled=use_precompiled
+        )
 
         return BuildkiteStep(
             label=":docker: build image",
@@ -62,6 +79,9 @@ class PipelineGenerator:
             commands=build_commands,
             depends_on=None,
         )
+
+    def should_use_precompiled_wheel(self) -> bool:
+        return self.config.should_use_precompiled_wheel()
 
 def read_test_steps(file_path: str) -> List[TestStep]:
     """Read test steps from test pipeline yaml and parse them into TestStep objects."""

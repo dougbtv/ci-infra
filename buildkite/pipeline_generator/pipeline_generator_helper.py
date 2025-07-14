@@ -46,11 +46,17 @@ def convert_test_step_to_buildkite_step(step: TestStep, container_image: str) ->
         buildkite_step.plugins = None
     return buildkite_step
 
-def get_build_commands(container_registry: str, buildkite_commit: str, container_image: str) -> List[str]:
+def get_build_commands(
+    container_registry: str,
+    buildkite_commit: str,
+    container_image: str,
+    use_precompiled: bool = False
+) -> List[str]:
     ecr_login_command = (
         "aws ecr-public get-login-password --region us-east-1 | "
         f"docker login --username AWS --password-stdin {container_registry}"
     )
+
     image_check_command = f"""#!/bin/bash
 if [[ -z $(docker manifest inspect {container_image}) ]]; then
 echo "Image not found, proceeding with build..."
@@ -59,16 +65,19 @@ echo "Image found"
 exit 0
 fi
 """
+
     docker_build_command = (
         f"docker build "
         f"--file docker/Dockerfile "
         f"--build-arg max_jobs=64 "
+        f"--build-arg VLLM_USE_PRECOMPILED={'1' if use_precompiled else '0'} "
         f"--build-arg buildkite_commit={buildkite_commit} "
         f"--build-arg USE_SCCACHE=1 "
         f"--tag {container_image} "
         f"--target test "
         f"--progress plain ."
     )
-    # TODO: Stop using . in docker build command
+
     docker_push_command = f"docker push {container_image}"
+
     return [ecr_login_command, image_check_command, docker_build_command, docker_push_command]

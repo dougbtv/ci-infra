@@ -28,6 +28,33 @@ def test_pipeline_generator_config_get_container_image():
     assert config.container_image == "container.registry/test:abcdef0123456789abcdef0123456789abcdef01"
 
 
+def test_generate_build_step_sets_precompiled_flag():
+    config = PipelineGeneratorConfig(
+        container_registry=TEST_CONTAINER_REGISTRY,
+        container_registry_repo=TEST_CONTAINER_REGISTRY_REPO,
+        commit=TEST_COMMIT,
+        list_file_diff=["README.md"],  # Not a watched path
+    )
+    generator = PipelineGenerator(config)
+    step = generator.generate_build_step()
+    command_str = "\n".join(step.commands)
+
+    assert "VLLM_USE_PRECOMPILED=1" in command_str
+
+def test_generate_build_step_without_precompiled_flag():
+    config = PipelineGeneratorConfig(
+        container_registry=TEST_CONTAINER_REGISTRY,
+        container_registry_repo=TEST_CONTAINER_REGISTRY_REPO,
+        commit=TEST_COMMIT,
+        list_file_diff=["csrc/fake.cpp"],  # This should trigger a full build
+    )
+    generator = PipelineGenerator(config)
+    step = generator.generate_build_step()
+    command_str = "\n".join(step.commands)
+
+    assert "VLLM_USE_PRECOMPILED=1" not in command_str
+
+
 @pytest.mark.parametrize(
     "commit",
     [
