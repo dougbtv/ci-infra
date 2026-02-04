@@ -1,9 +1,10 @@
-from typing import TypedDict, List, Dict, Optional
+from typing import TypedDict, List, Dict, Optional, Tuple
 import yaml
 import os
 import re
 import requests
-from utils_lib.git_utils import get_merge_base_commit, get_list_file_diff, get_pr_labels
+from utils_lib.git_utils import get_merge_base_commit, get_list_file_diff, get_pr_labels, has_cpp_changes_between
+from utils_lib.wheel_utils import find_nearest_wheel_commit
 
 
 class GlobalConfig(TypedDict):
@@ -44,6 +45,22 @@ def init_global_config(pipeline_config_path: str):
     list_file_diff = get_list_file_diff(branch, merge_base_commit)
     pr_labels = get_pr_labels(pull_request, pipeline_config["github_repo_name"])
 
+    run_all = _should_run_all(
+        pr_labels,
+        list_file_diff,
+        pipeline_config.get("run_all_patterns", None),
+        pipeline_config.get("run_all_exclude_patterns", None),
+    )
+
+    # Determine if we should use precompiled wheels and which commit to use
+    use_precompiled, precompiled_commit = _should_use_precompiled(
+        run_all,
+        merge_base_commit,
+    )
+
+    # Use the precompiled commit if we found an ancestor wheel
+    final_merge_base_commit = precompiled_commit if use_precompiled and precompiled_commit else merge_base_commit
+
     config = GlobalConfig(
         name=pipeline_config["name"],
         github_repo_name=pipeline_config["github_repo_name"],
@@ -57,24 +74,11 @@ def init_global_config(pipeline_config_path: str):
         run_all_patterns=pipeline_config.get("run_all_patterns", None),
         run_all_exclude_patterns=pipeline_config.get("run_all_exclude_patterns", None),
         nightly=os.getenv("NIGHTLY", "0"),
-        run_all=_should_run_all(
-            pr_labels,
-            list_file_diff,
-            pipeline_config.get("run_all_patterns", None),
-            pipeline_config.get("run_all_exclude_patterns", None),
-        ),
-        merge_base_commit=merge_base_commit,
+        run_all=run_all,
+        merge_base_commit=final_merge_base_commit,
         list_file_diff=list_file_diff,
         fail_fast=_should_fail_fast(pr_labels),
-        use_precompiled=_should_use_precompiled(
-            _should_run_all(
-                pr_labels,
-                list_file_diff,
-                pipeline_config.get("run_all_patterns", None),
-                pipeline_config.get("run_all_exclude_patterns", None),
-            ),
-            merge_base_commit,
-        ),
+        use_precompiled=use_precompiled,
     )
     if "ready-run-all-tests" in pr_labels:
         config["run_all"] = True
@@ -139,18 +143,43 @@ def _should_fail_fast(pr_labels: List[str]) -> bool:
     return True
 
 
-def _should_use_precompiled(run_all: bool, merge_base_commit: Optional[str]) -> bool:
+def _should_use_precompiled(run_all: bool, merge_base_commit: Optional[str]) -> Tuple[bool, Optional[str]]:
+    """
+    Determine if precompiled wheels should be used.
+
+    Returns:
+        (use_precompiled: bool, commit_to_use: Optional[str])
+    """
+    # Force precompiled if env var set
     if os.getenv("VLLM_USE_PRECOMPILED") == "1":
-        return True
+        print("VLLM_USE_PRECOMPILED=1, using precompiled wheels")
+        return (True, merge_base_commit)
+
+    # Never use precompiled if running all tests
     if run_all:
-        return False
-    wheel_metadata_url = (
-        f"https://wheels.vllm.ai/{merge_base_commit}/vllm/metadata.json"
-    )
-    response = requests.get(wheel_metadata_url)
-    if response.status_code != 200:
-        return False
-    if response.headers:
-        return True
+        print("Running all tests, skipping precompiled wheels")
+        return (False, None)
+
+    if not merge_base_commit:
+        print("No merge base commit found, skipping precompiled wheels")
+        return (False, None)
+
+    # Try to find nearest wheel (might be merge_base or an ancestor)
+    print(f"Searching for precompiled wheel starting from merge-base: {merge_base_commit}")
+    wheel_commit = find_nearest_wheel_commit(merge_base_commit, max_ancestors=20)
+
+    if not wheel_commit:
+        print("No precompiled wheel found in last 20 commits")
+        return (False, None)
+
+    # If we found an ancestor (not merge_base itself), verify no C++ changes
+    if wheel_commit != merge_base_commit:
+        print(f"Found wheel at ancestor commit: {wheel_commit}")
+        if has_cpp_changes_between(wheel_commit, merge_base_commit):
+            print("C++ changes detected between wheel commit and merge-base, must recompile")
+            return (False, None)
+        print("No C++ changes detected, using ancestor wheel")
     else:
-        return False
+        print(f"Found wheel at merge-base commit: {wheel_commit}")
+
+    return (True, wheel_commit)
